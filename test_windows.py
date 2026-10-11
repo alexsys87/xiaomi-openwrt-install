@@ -100,6 +100,79 @@ class InstallerWindowsTests(unittest.TestCase):
             self.assertFalse(sha512_crypt.verify("wrong", result))
 
 
+class SSHCleanupTests(unittest.TestCase):
+    """Force the disconnect race; real loopback timing is nondeterministic."""
+
+    def session(self, error):
+        channel = mock.Mock()
+        channel.recv_ready.return_value = False
+        channel.recv_stderr_ready.return_value = False
+        channel.exit_status_ready.return_value = True
+        channel.recv_exit_status.return_value = 0
+        channel.close.side_effect = error
+        transport = mock.Mock()
+        transport.open_session.return_value = channel
+        return transport, channel
+
+    def test_run_preserves_result_and_exit_status(self):
+        for error in (EOFError(), ConnectionResetError("peer closed")):
+            with self.subTest(error=type(error).__name__):
+                transport, channel = self.session(error)
+                channel.recv_ready.side_effect = [True, False, False]
+                channel.recv.return_value = b"command output\n"
+                channel.recv_exit_status.return_value = 7
+                with mock.patch.object(winssh, "_authenticated", return_value=transport):
+                    self.assertEqual(winssh.run("router.test", "test", [""]),
+                                     (7, "command output"))
+                channel.close.assert_called_once_with()
+                transport.close.assert_called_once_with()
+
+    def test_run_preserves_command_error(self):
+        transport, channel = self.session(EOFError())
+        channel.exec_command.side_effect = OSError("command connection lost")
+        with mock.patch.object(winssh, "_authenticated", return_value=transport):
+            with self.assertRaisesRegex(winssh.SSHError, "command connection lost"):
+                winssh.run("router.test", "test", [""])
+        transport.close.assert_called_once_with()
+
+    def test_upload_preserves_success(self):
+        for error in (EOFError(), BrokenPipeError("peer closed")):
+            with self.subTest(error=type(error).__name__):
+                transport, channel = self.session(error)
+                channel.recv.return_value = b"\x00"
+                with tempfile.TemporaryDirectory() as directory:
+                    local = os.path.join(directory, "image.bin")
+                    with open(local, "wb") as output:
+                        output.write(b"firmware")
+                    with mock.patch.object(winssh, "_authenticated", return_value=transport):
+                        self.assertIsNone(winssh.upload("router.test", local, "/tmp/image.bin", [""]))
+                channel.close.assert_called_once_with()
+                transport.close.assert_called_once_with()
+
+    def test_upload_preserves_receiver_error(self):
+        transport, channel = self.session(EOFError())
+        channel.recv.side_effect = [b"\x01", b"n", b"o", b"\n"]
+        with mock.patch.object(winssh, "_authenticated", return_value=transport):
+            with self.assertRaisesRegex(winssh.SSHError, "receiver rejected transfer: no"):
+                winssh.upload("router.test", "unused", "/tmp/image.bin", [""])
+        transport.close.assert_called_once_with()
+
+    def test_open_session_error_still_closes_transport(self):
+        transport, _ = self.session(None)
+        transport.open_session.side_effect = EOFError("session connection lost")
+        transport.close.side_effect = EOFError("already closed")
+        with mock.patch.object(winssh, "_authenticated", return_value=transport):
+            with self.assertRaisesRegex(winssh.SSHError, "session connection lost"):
+                winssh.run("router.test", "test", [""])
+        transport.close.assert_called_once_with()
+
+    def test_unexpected_cleanup_error_is_not_silenced(self):
+        transport, channel = self.session(ValueError("cleanup bug"))
+        with self.assertRaisesRegex(ValueError, "cleanup bug"):
+            winssh._close_session(transport, channel)
+        transport.close.assert_called_once_with()
+
+
 class SSHTransportTests(unittest.TestCase):
     """Real loopback SSH/SCP exchange, not just mocked transport calls."""
     @classmethod

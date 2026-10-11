@@ -59,6 +59,25 @@ def _authenticated(host, passwords, timeout):
     raise SSHError("Permission denied: none of the configured root passwords worked")
 
 
+def _close_session(transport, channel):
+    """Best-effort cleanup: a peer may close just after sending exit status.
+
+    Ignore only EOF/socket errors during cleanup, not during SSH/SCP work.
+    Always close the transport even if closing its channel fails.
+    """
+    try:
+        if channel is not None:
+            try:
+                channel.close()
+            except (EOFError, OSError):
+                pass
+    finally:
+        try:
+            transport.close()
+        except (EOFError, OSError):
+            pass
+
+
 def run(host, command, passwords, timeout=120):
     """Drain both streams before collecting status (large output cannot deadlock)."""
     transport = _authenticated(host, passwords, timeout)
@@ -89,9 +108,7 @@ def run(host, command, passwords, timeout=120):
     except Exception as exc:
         raise SSHError(f"SSH command failed: {exc}") from exc
     finally:
-        if channel is not None:
-            channel.close()
-        transport.close()
+        _close_session(transport, channel)
 
 
 def _ack(channel):
@@ -156,6 +173,4 @@ def upload(host, local, remote, passwords, timeout=900):
     except Exception as exc:
         raise SSHError(f"SCP transfer failed: {exc}") from exc
     finally:
-        if channel is not None:
-            channel.close()
-        transport.close()
+        _close_session(transport, channel)
