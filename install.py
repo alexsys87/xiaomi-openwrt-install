@@ -76,6 +76,8 @@ import channel
 import devices
 import release
 import ubiparse
+import hostnet
+import winssh
 from chain import ChainError, log
 
 IMAGE_FLAVOURS = {"standard": "default", "nss": "nss"}
@@ -289,7 +291,7 @@ def backup(ch, sink, outdir, mtd, attacker, file_port, profile, token):
         log(f"[b] {part} -> {label}.bin ({n} B)")
         got[label] = path
     rc, env = ch.run("nvram show", quiet=True)
-    with open(f"{outdir}/nvram-before.txt", "w") as fh:
+    with open(f"{outdir}/nvram-before.txt", "w", encoding="utf-8") as fh:
         fh.write(env + "\n")
     log(f"[b] u-boot environment -> {outdir}/nvram-before.txt")
     return got
@@ -553,7 +555,7 @@ def verify_written(ch, tidx, want_md5, want_len):
 
 def write_tmp(outdir, name, text):
     path = os.path.join(outdir, name)
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
     os.chmod(path, 0o600)
     return path
@@ -641,6 +643,12 @@ def build_config_tar(path, ssid, key, profile, country=None, pwhash=None):
 
 def password_hash(plain):
     """SHA-512 crypt, via openssl -- python's crypt module is gone in 3.13."""
+    if hostnet.is_windows():
+        try:
+            from passlib.hash import sha512_crypt
+        except ImportError as exc:
+            raise Abort("run: py -3 -m pip install -r requirements-windows.txt") from exc
+        return sha512_crypt.using(rounds=100000).hash(plain)
     r = subprocess.run(["openssl", "passwd", "-6", "-stdin"],
                        input=plain + "\n", capture_output=True, text=True,
                        timeout=30)
@@ -693,6 +701,11 @@ def ssh_banner(host, timeout=10):
 
 def default_gateways():
     """{gateway address: egress device} for this host's IPv4 default routes."""
+    if hostnet.is_windows():
+        try:
+            return hostnet.default_gateways()
+        except hostnet.NetworkError as exc:
+            raise Abort(str(exc)) from exc
     out = {}
     try:
         r = subprocess.run(["ip", "-4", "route", "show", "default"],
@@ -713,6 +726,19 @@ def discover_linklocal(iface, timeout=15):
     which collides with an extremely common gateway address, and a link-local
     with a scope can only mean the device on that link.
     """
+    if hostnet.is_windows():
+        try:
+            found = hostnet.discover_candidates(iface, timeout)
+        except hostnet.NetworkError as exc:
+            raise Abort(str(exc)) from exc
+        good = [candidate for candidate in found
+                if (ssh_banner(candidate, timeout=5)[0] or "").lower()
+                .startswith("ssh-2.0-dropbear")]
+        if len(good) != 1:
+            raise Abort(f"expected one Dropbear router on {iface}, found {len(good)}; "
+                        "check the link, enable IPv6, and join the displayed RAM "
+                        "Wi-Fi after reboot (or pass --openwrt-host fe80::...%INDEX)")
+        return good[0]
     def our_addrs():
         try:
             r = subprocess.run(["ip", "-o", "-6", "addr", "show", "dev", iface,
@@ -795,6 +821,16 @@ SSH_PASSWORDS = [""]
 
 def ssh(host, cmd, timeout=120, check=True):
     """Root over dropbear, trying each password we might have set."""
+    if hostnet.is_windows():
+        try:
+            result = winssh.run(host, cmd, SSH_PASSWORDS, timeout)
+        except winssh.SSHError as exc:
+            if not check:
+                return 1, str(exc)
+            raise Abort(str(exc)) from exc
+        if check and result[0] != 0:
+            raise Abort(f"ssh {cmd!r} failed: {result[1]}")
+        return result
     last = (1, "")
     for pw in SSH_PASSWORDS:
         base = ["ssh", "-o", "StrictHostKeyChecking=no",
@@ -817,6 +853,11 @@ def ssh(host, cmd, timeout=120, check=True):
 
 def scp_to(host, local, remote):
     """scp needs an IPv6 literal bracketed, or its colons read as host:path."""
+    if hostnet.is_windows():
+        try:
+            return winssh.upload(host, local, remote, SSH_PASSWORDS)
+        except winssh.SSHError as exc:
+            raise Abort(str(exc)) from exc
     dest = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
     for pw in SSH_PASSWORDS:
@@ -1041,7 +1082,7 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
     script_body = build_sysupgrade_launcher(opts)
     with tempfile.TemporaryDirectory() as tmp:
         launcher = os.path.join(tmp, "run-sysupgrade.sh")
-        with open(launcher, "w") as output:
+        with open(launcher, "w", encoding="utf-8", newline="\n") as output:
             output.write(script_body)
         scp_to(host, launcher, "/tmp/run-sysupgrade.sh")
     rc, active_upgrade = ssh(
@@ -1136,6 +1177,8 @@ def parse_args(argv=None):
         help="interface for permanent-system verification (default: install interface)")
     ap.add_argument("--dry-run", action="store_true",
                     help="download and verify the selected release; do not contact the router")
+    ap.add_argument("--list-interfaces", action="store_true",
+                    help="list Windows adapter names, indices and IPv4 addresses; then exit")
     ap.add_argument("--yes", action="store_true",
                     help="skip write and reboot confirmation prompts")
 
@@ -1193,6 +1236,11 @@ def parse_args(argv=None):
 
 def detect_transport(interface, sysfs_root="/sys/class/net"):
     """Classify a Linux network interface without sending network traffic."""
+    if hostnet.is_windows():
+        try:
+            return "wifi" if hostnet.adapter(interface)["wireless"] else "wired"
+        except hostnet.NetworkError as exc:
+            raise Abort(str(exc)) from exc
     if not interface:
         raise Abort("cannot detect transport without a network interface")
     device = os.path.join(sysfs_root, interface)
@@ -1204,6 +1252,11 @@ def detect_transport(interface, sysfs_root="/sys/class/net"):
 
 def interface_ipv4_networks(interface):
     """Return IPv4 interface objects assigned to one operator-side link."""
+    if hostnet.is_windows():
+        try:
+            return [ipaddress.ip_interface(addr) for addr in hostnet.adapter(interface)["ipv4"]]
+        except (hostnet.NetworkError, ValueError) as exc:
+            raise Abort(str(exc)) from exc
     try:
         result = subprocess.run(
             ["ip", "-o", "-4", "addr", "show", "dev", interface],
@@ -1417,12 +1470,17 @@ def _write_resume_data(path, data):
     tmp = path + ".tmp"
     descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w") as output:
-        os.fchmod(output.fileno(), 0o600)
+        if not hostnet.is_windows():
+            os.fchmod(output.fileno(), 0o600)
         json.dump(data, output, indent=2, sort_keys=True)
         output.write("\n")
         output.flush()
         os.fsync(output.fileno())
     os.replace(tmp, path)
+    # Windows does not expose POSIX directory descriptors/fchmod. Flush the
+    # file above and atomically replace it; folder privacy comes from NTFS ACLs.
+    if hostnet.is_windows():
+        return
     directory = os.path.dirname(os.path.abspath(path))
     directory_fd = os.open(directory, os.O_RDONLY)
     try:
@@ -1468,6 +1526,17 @@ def verify_resume_selection(resume, args, profile, rel, images):
 def main(argv=None):
     os.umask(0o077)
     args = parse_args(argv)
+    if args.list_interfaces:
+        if not hostnet.is_windows():
+            raise Abort("--list-interfaces is for Windows; use `ip -br addr` on Linux")
+        try:
+            for adapter in hostnet.adapters():
+                log(f"{adapter['index']:>4}  {adapter['name']}  "
+                    f"{'wifi' if adapter['wireless'] else 'wired'}  "
+                    f"{', '.join(adapter['ipv4']) or 'no IPv4'}")
+        except hostnet.NetworkError as exc:
+            raise Abort(str(exc)) from exc
+        return 0
     requested_attacker = args.attacker
     if args.resume_manifest:
         args.resume_manifest = os.path.abspath(args.resume_manifest)
@@ -1503,11 +1572,28 @@ def main(argv=None):
         or f"install-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(outdir, mode=0o700, exist_ok=True)
     os.chmod(outdir, 0o700)
-    chain.set_log_sink(open(f"{outdir}/transcript.log", "a" if resume else "w"))
+    chain.set_log_sink(open(f"{outdir}/transcript.log", "a" if resume else "w",
+                            encoding="utf-8"))
     log(f"[*] output -> {outdir}/")
 
+    if hostnet.is_windows():
+        try:
+            if args.discover:
+                args.discover = hostnet.adapter(args.discover)["name"]
+            if args.verify_interface:
+                args.verify_interface = hostnet.adapter(args.verify_interface)["name"]
+            if not args.dry_run:
+                winssh.dependencies()
+        except (hostnet.NetworkError, winssh.SSHError) as exc:
+            raise Abort(str(exc)) from exc
+
     if not args.discover and (args.stage == "all" or args.transport == "auto"):
-        args.discover = chain.local_interface(args.host)
+        try:
+            args.discover = chain.local_interface(args.host)
+        except ChainError:
+            if not args.dry_run:
+                raise
+            args.discover = None
         if args.discover:
             log(f"[*] router-facing interface: {args.discover} (auto-detected)")
     if args.transport == "auto":

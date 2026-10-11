@@ -124,7 +124,7 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             sh = os.path.join(tmp, "pv.sh")
-            with open(sh, "w") as fh:
+            with open(sh, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(PIVOT_SCRIPT.format(k=k))
             install.scp_to(host, sh, "/tmp/pv.sh")
         install.ssh(host, "chmod +x /tmp/pv.sh; rm -f /tmp/pv.status",

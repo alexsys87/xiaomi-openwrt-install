@@ -49,6 +49,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import hostnet
+
 # ---- firmware constants -----------------------------------------------------
 
 # The mesh authenticator, literal @0xcabb in /usr/sbin/cab_meshd. Identical on
@@ -141,6 +143,12 @@ def api(host, stok, path, params=None):
 
 
 def _route_field(host, field):
+    if hostnet.is_windows():
+        try:
+            source, interface = hostnet.route(host)
+            return {"src": source, "dev": interface}.get(field)
+        except hostnet.NetworkError as exc:
+            raise ChainError(str(exc)) from exc
     try:
         out = subprocess.run(
             ["ip", "-o", "route", "get", host],
@@ -168,6 +176,11 @@ def local_mac(host):
     slot -- it compares against the real remote MAC purely to log a line -- so
     an approximation is fine, but the real one keeps the logs honest."""
     dev = _route_field(host, "dev")
+    if dev and hostnet.is_windows():
+        try:
+            return hostnet.adapter(dev)["mac"].replace("-", ":").lower()
+        except hostnet.NetworkError as exc:
+            raise ChainError(str(exc)) from exc
     if dev:
         try:
             with open(f"/sys/class/net/{dev}/address") as fh:
