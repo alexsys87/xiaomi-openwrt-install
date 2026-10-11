@@ -1,5 +1,7 @@
 # xiaomi-openwrt-install
 
+**English** · [Русская инструкция: Windows 10 и установка по Wi-Fi](README.ru.md)
+
 Install OpenWrt on a supported Xiaomi router without UART or soldering, or
 return an installed router to an approved stock image.
 
@@ -91,8 +93,13 @@ firewall rule. Store backups, configuration archives and `resume.json` in a
 private, non-shared NTFS folder: Windows permissions are inherited from that
 folder, not POSIX `chmod`. These files contain device data and session secrets.
 The host-key policy is unchanged: run only on your isolated, trusted router
-link. Automated Windows tests use a hosted Windows runner; a complete flash
-from a physical Windows 10 PC still requires hardware validation.
+link. Automated Windows tests use a hosted Windows runner. A complete native
+Windows 10 Wi-Fi installation was confirmed on physical Xiaomi AX3000T RD03v2
+hardware on 2026-10-11: stock ROM 2.0.28 → standard OpenWrt release v1.14.
+The final verification reported `board=xiaomi,mi-router-ax3000t-v2`,
+`rootfs_type=overlay`, and `OpenWrt is installed on NAND.` See the
+[Russian walkthrough and troubleshooting notes](README.ru.md) for this run.
+This confirms that particular installation, not every device or firmware variant.
 
 ## Install OpenWrt
 
