@@ -1,0 +1,35 @@
+name: Installer tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.9', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-windows.txt
+      - name: Compile Python modules
+        run: python -m compileall -q .
+      - name: Windows networking and real loopback SSH/SCP regressions
+        run: python -m unittest -v test_hostnet test_windows
+      - name: Exercise real Windows adapter enumeration
+        if: runner.os == 'Windows'
+        run: python install.py --list-interfaces
+      - name: Install BusyBox for Unix shell integration tests
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y busybox
+      - name: Existing installer self-tests
+        if: runner.os == 'Linux'
+        run: python selftest.py
